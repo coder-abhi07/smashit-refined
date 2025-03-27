@@ -15,11 +15,14 @@ from .forms import UserUpdateForm, CustomUserSignupForm
 
 
 
+
+
 def textResponse(request):
     """Extract text using OCR.space, apply clustering, and display the result."""
     if request.method == 'POST' and request.FILES.getlist('myfile'):
         parsed_text = []
         api_key = settings.OCR_API_KEY
+        gemini_key = settings.GEMINI_API_KEY  # Store API key in settings.py
         payload = {"apikey": api_key, "OCREngine": 2, "isTable": True}
 
         for file in request.FILES.getlist('myfile'):
@@ -31,7 +34,6 @@ def textResponse(request):
             results = response.json()
 
             if results.get("IsErroredOnProcessing", False):
-                error_message = results.get("ErrorMessage", ["Unknown error"])[0]
                 return custom_error_view(request)  # Show custom 500 error page
 
             for result in results.get("ParsedResults", []):
@@ -42,36 +44,49 @@ def textResponse(request):
         if not ocr_text:
             return custom_error_view(request)  # Show 500 error if no text extracted
 
-        clustered_text = cluster_text(ocr_text)
+        # Use Gemini API for better clustering
+        clustered_text = cluster_with_gemini(ocr_text, gemini_key)
 
         return render(request, "result.html", {"clustered_text": clustered_text})
 
     return custom_bad_request_view(request)  # Show 400 error if invalid request
 
+def cluster_with_gemini(text, api_key):
+    """Send extracted text to Gemini API using requests and get clustered questions."""
+    if not text.strip():
+        return "No text available for clustering."
 
-def cluster_text(text):
-    """Cluster text using KMeans with TF-IDF vectorization."""
-    sentences = [s.strip() for s in text.split("\n") if s.strip()]
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
+    headers = {"Content-Type": "application/json"}
+    params = {"key": api_key}
+    data = {
+        "contents": [{"parts": [{"text": f"Cluster the following questions into relevant categories:\n\n{text}\n\nGroup them under appropriate topics."}]}]
+    }
 
-    if len(sentences) < 2:
-        return "Not enough text to cluster."
+    try:
+        response = requests.post(url, headers=headers, params=params, json=data)
+        response.raise_for_status()  # Raise an error for bad responses
+        result = response.json()
 
-    vectorizer = TfidfVectorizer(stop_words="english")
-    X = vectorizer.fit_transform(sentences)
+        # Extract response text
+        raw_text = result.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "No clustering result.")
 
-    num_clusters = min(5, len(sentences))
-    kmeans = KMeans(n_clusters=num_clusters, random_state=42, n_init=10)
-    labels = kmeans.fit_predict(X)
+        # Convert response to HTML format
+        clustered_text = '<div id="clustered-text">'
+        clusters = raw_text.split("\n\n")  # Assume Gemini returns clusters separated by two newlines
 
-    clustered_text = '<div id="clustered-text">'
-    for i in range(num_clusters):
-        clustered_text += f'<div class="cluster"><h2>Cluster {i+1}</h2><p>'
-        clustered_text += "<br>".join([sentences[j] for j in range(len(sentences)) if labels[j] == i])
-        clustered_text += "</p></div>"
+        for i, cluster in enumerate(clusters):
+            lines = cluster.split("\n")
+            if lines:
+                clustered_text += f'<div class="cluster"><h2>Cluster {i+1}</h2><p>'
+                clustered_text += "<br>".join(lines)
+                clustered_text += "</p></div>"
 
-    clustered_text += "</div>"
+        clustered_text += "</div>"
 
-    return clustered_text
+        return clustered_text
+    except requests.exceptions.RequestException as e:
+        return f"<div>Error processing with Gemini</div>"
 
 
 def custom_page_not_found_view(request, exception = None):
